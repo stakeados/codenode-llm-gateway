@@ -1,0 +1,29 @@
+version: "3.8"
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: "llm-gateway"
+    restart: unless-stopped
+    env_file:
+      - .env
+    # Limites conservadores exigidos (podcast-ready)
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=proxy-net"
+      - "traefik.http.routers.llm-gateway.rule=Host(\"api.codenode.cloud\")"
+      - "traefik.http.routers.llm-gateway.entrypoints=web"
+      - "traefik.http.services.llm-gateway.loadbalancer.server.port=3000"
+    networks:
+      - proxy-net
+
+networks:
+  proxy-net:
+    external: true

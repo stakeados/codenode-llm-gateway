@@ -1,0 +1,21 @@
+{
+  "serviceSlug": "llm-gateway",
+  "displayName": "LLM Multiplexer API",
+  "subdomain": "llm-gateway",
+  "containerPort": 3000,
+  "healthPath": "/health",
+  "infoPath": "/info",
+  "category": "ai",
+  "tags": ["x402", "bazaar", "openai-compatible"],
+  "resources": { "cpu": "0.50", "memory": "512M" },
+  "env": [
+    { "name": "PORT", "required": false, "default": "3000" },
+    { "name": "API_PROXY_KEY", "required": false, "description": "Key to protect access to the proxy endpoints" },
+    { "name": "REQUIRE_PAYMENT", "required": false, "default": "false", "description": "Enable 402 responses" },
+    { "name": "OPENROUTER_API_KEY", "required": false },
+    { "name": "GROQ_API_KEY", "required": false },
+    { "name": "CEREBRAS_API_KEY", "required": false },
+    { "name": "GOOGLE_GENERATIVE_AI_API_KEY", "required": false },
+    { "name": "DEEPSEEK_API_KEY", "required": false }
+  ]
+}

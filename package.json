@@ -1,0 +1,23 @@
+{
+  "name": "codenode-llm-gateway",
+  "version": "2.0.0",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "bun run index.ts",
+    "dev": "bun --watch run index.ts",
+    "check-conflicts": "bash scripts/check-conflicts.sh"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@cerebras/cerebras_cloud_sdk": "^1.59.0",
+    "@google/generative-ai": "^0.24.1",
+    "groq-sdk": "^0.37.0"
+  }
+}
