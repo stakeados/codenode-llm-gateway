@@ -1,24 +1,35 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
-import type { AIService, ChatMessage } from '../types';
+import { KeyRotator } from '../utils/key-rotator';
+import type { AIService, ChatMessage, ChunkDelta, CompletionResponse } from '../types';
 
-const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY || '';
-const genAI = new GoogleGenerativeAI(apiKey);
-const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+const keys = new KeyRotator('GOOGLE_GENERATIVE_AI_API_KEY', 'Gemini');
+const DEFAULT_MODEL = 'gemini-2.0-flash';
+
+// Pool of GenAI instances — one per API key for multi-key rotation
+const genAIPool = keys.all().map(key => new GoogleGenerativeAI(key));
+let poolIndex = 0;
+
+function getGenAI() {
+  const instance = genAIPool[poolIndex % genAIPool.length]!;
+  poolIndex = (poolIndex + 1) % genAIPool.length;
+  return instance;
+}
 
 export const geminiService: AIService = {
   name: 'Gemini',
-  async chat(messages: ChatMessage[]) {
+  supportsTools: false,
+  contextWindow: 1_000_000,
 
+  async chat(messages: ChatMessage[], tools?: any[], tool_choice?: any, payloadModel?: string) {
     try {
-      // Gemini requires alternating user/model roles and the first message must be user or function_response
-      // We'll simplisticly map 'system' to 'user' for the first message if needed, 
-      // and consolidate consecutive same-role messages if necessary (though simple mapping is usually enough for well-behaved clients)
+      const genAI = getGenAI();
+      const model = genAI.getGenerativeModel({ model: payloadModel || DEFAULT_MODEL });
 
+      // Gemini requires alternating user/model roles and the first message must be user
       let validMessages = messages.map(msg => ({
-        role: msg.role === 'assistant' ? 'model' : 'user', // Map assistant -> model, system -> user
-        parts: [{ text: msg.content }],
+        role: msg.role === 'assistant' ? 'model' : 'user',
+        parts: [{ text: msg.content || '' }],
       }));
-
 
       // Ensure first message is user
       if (validMessages.length > 0 && validMessages[0]) {
@@ -31,30 +42,36 @@ export const geminiService: AIService = {
       const lastMessagePart = validMessages[validMessages.length - 1]?.parts[0];
       const lastMessage = lastMessagePart?.text || '';
 
-      const chat = model.startChat({
-        history,
-      });
-
+      const chat = model.startChat({ history });
       const result = await chat.sendMessageStream(lastMessage);
 
+      // FIX: yield ChunkDelta objects, not raw strings
       return (async function* () {
         for await (const chunk of result.stream) {
-          yield chunk.text();
+          yield {
+            content: chunk.text(),
+            role: 'assistant'
+          } as ChunkDelta;
         }
-      })()
+      })();
     } catch (error: any) {
       console.error(`[Gemini] Error: ${error.message}`, error);
       throw error;
     }
   },
-  async complete(messages: ChatMessage[]) {
-    try {
-      if (!messages || messages.length === 0) return '';
 
+  async complete(messages: ChatMessage[], tools?: any[], tool_choice?: any, payloadModel?: string) {
+    try {
+      if (!messages || messages.length === 0) {
+        return { role: 'assistant', content: '' } as CompletionResponse;
+      }
+
+      const genAI = getGenAI();
+      const model = genAI.getGenerativeModel({ model: payloadModel || DEFAULT_MODEL });
 
       let validMessages = messages.map(msg => ({
         role: msg.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: msg.content }],
+        parts: [{ text: msg.content || '' }],
       }));
 
       // Ensure first message is user
@@ -64,20 +81,21 @@ export const geminiService: AIService = {
         }
       }
 
-
       const history = validMessages.slice(0, -1);
       const lastMessagePart = validMessages[validMessages.length - 1]?.parts[0];
       const lastMessage = lastMessagePart?.text || '';
 
-      const chat = model.startChat({
-        history,
-      });
-
+      const chat = model.startChat({ history });
       const result = await chat.sendMessage(lastMessage);
-      return result.response.text();
+
+      // FIX: return CompletionResponse object, not raw string
+      return {
+        role: 'assistant',
+        content: result.response.text() || null
+      } as CompletionResponse;
     } catch (error: any) {
       console.error(`[Gemini] Complete Error: ${error.message}`, error);
       throw error;
     }
   }
-}
+};

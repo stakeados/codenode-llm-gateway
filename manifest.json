@@ -12,10 +12,17 @@
     { "name": "PORT", "required": false, "default": "3000" },
     { "name": "API_PROXY_KEY", "required": false, "description": "Key to protect access to the proxy endpoints" },
     { "name": "REQUIRE_PAYMENT", "required": false, "default": "false", "description": "Enable 402 responses" },
+    { "name": "EMERGENCY_PROVIDER", "required": false, "default": "OpenRouter", "description": "Free provider for Phase 2 emergency retry" },
+    { "name": "EMERGENCY_API_KEY", "required": false, "description": "Paid API key for Phase 3 last-resort fallback" },
+    { "name": "EMERGENCY_API_URL", "required": false, "default": "https://api.openai.com/v1/chat/completions" },
+    { "name": "EMERGENCY_MODEL", "required": false, "default": "gpt-4o-mini" },
     { "name": "OPENROUTER_API_KEY", "required": false },
     { "name": "GROQ_API_KEY", "required": false },
     { "name": "CEREBRAS_API_KEY", "required": false },
     { "name": "GOOGLE_GENERATIVE_AI_API_KEY", "required": false },
-    { "name": "DEEPSEEK_API_KEY", "required": false }
+    { "name": "DEEPSEEK_API_KEY", "required": false },
+    { "name": "MISTRAL_API_KEY", "required": false },
+    { "name": "NVIDIA_API_KEY", "required": false },
+    { "name": "GITHUB_MODELS_API_KEY", "required": false }
   ]
 }

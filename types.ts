@@ -20,6 +20,10 @@ export interface CompletionResponse {
 
 export interface AIService {
   name: string;
+  /** Whether this provider reliably handles OpenAI-style tools/function calling */
+  supportsTools: boolean;
+  /** Approximate context window in tokens for the default model */
+  contextWindow?: number;
   chat: (messages: ChatMessage[], tools?: any[], tool_choice?: any, payloadModel?: string) => Promise<AsyncIterable<ChunkDelta>>;
   complete: (messages: ChatMessage[], tools?: any[], tool_choice?: any, payloadModel?: string) => Promise<CompletionResponse | undefined>;
 }

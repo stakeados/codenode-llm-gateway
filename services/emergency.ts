@@ -1,17 +1,20 @@
 import { KeyRotator } from '../utils/key-rotator';
 import type { AIService, ChatMessage, ChunkDelta, CompletionResponse } from '../types';
 
-const keys = new KeyRotator('DEEPSEEK_API_KEY', 'DeepSeek');
-const BASE_URL = 'https://api.deepseek.com/chat/completions';
+// Paid emergency fallback — uses any OpenAI-compatible paid API.
+// Only called when ALL free providers have failed.
+const keys = new KeyRotator('EMERGENCY_API_KEY', 'Emergency');
+const BASE_URL = process.env.EMERGENCY_API_URL || 'https://api.openai.com/v1/chat/completions';
+const DEFAULT_MODEL = process.env.EMERGENCY_MODEL || 'gpt-4o-mini';
 
-export const deepseekService: AIService = {
-  name: 'DeepSeek',
+export const emergencyService: AIService = {
+  name: 'Emergency',
   supportsTools: true,
-  contextWindow: 64_000,
+  contextWindow: 128_000,
 
   async chat(messages: ChatMessage[], tools?: any[], tool_choice?: any, payloadModel?: string) {
     const body: any = {
-      model: payloadModel || 'deepseek-chat',
+      model: payloadModel || DEFAULT_MODEL,
       messages,
       stream: true
     };
@@ -31,6 +34,7 @@ export const deepseekService: AIService = {
 
     if (!response.ok) {
       const errText = await response.text();
+      console.error(`[Emergency] Stream Error ${response.status}: ${errText}`);
       throw Object.assign(new Error(`${response.status} ${errText}`), { status: response.status });
     }
 
@@ -53,7 +57,7 @@ export const deepseekService: AIService = {
               const data = JSON.parse(line.slice(6));
               const delta = data.choices?.[0]?.delta || {};
               yield { content: delta.content, tool_calls: delta.tool_calls, role: delta.role } as ChunkDelta;
-            } catch { /* ignore partial JSON */ }
+            } catch { /* ignore partial chunks */ }
           }
         }
       }
@@ -61,7 +65,7 @@ export const deepseekService: AIService = {
   },
 
   async complete(messages: ChatMessage[], tools?: any[], tool_choice?: any, payloadModel?: string) {
-    const body: any = { model: payloadModel || 'deepseek-chat', messages };
+    const body: any = { model: payloadModel || DEFAULT_MODEL, messages };
     if (tools?.length) {
       body.tools = tools;
       if (tool_choice) body.tool_choice = tool_choice;

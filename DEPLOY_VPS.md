@@ -1,76 +1,111 @@
-# Despliegue en VPS con Dokploy
+# ☁️ VPS Deployment Guide
 
-Tu proyecto ya está preparado para **Dokploy** porque incluye un archivo `nixpacks.toml`. Sigue estos pasos para tenerlo corriendo en tu VPS en minutos.
+Instructions for deploying the CodeNode LLM Gateway on a VPS using Dokploy, Docker Compose, or plain Docker.
 
-## 1. Preparación en Dokploy
+---
 
-1. Entra en tu panel de Dokploy.
-2. Crea un nuevo **Project**.
-3. Crea un nuevo **Service** de tipo **Application**.
+## 1. Dokploy (Recommended)
 
-## 2. Configuración del Repositorio
+The project includes a `nixpacks.toml` for automatic detection and deployment.
 
-1. Conecta tu repositorio de GitHub (o pega la URL pública).
-2. En la pestaña **General**:
-   - **Build Type**: Elige `Nixpacks` (lo detectará automáticamente por el archivo `nixpacks.toml`).
-   - El puerto por defecto será el `3000`.
+### Setup
+1. Open your Dokploy panel and create a new **Project**.
+2. Create a new **Service** of type **Application**.
+3. Connect your GitHub repository (or paste the public URL).
+4. In the **General** tab:
+   - **Build Type:** Select `Nixpacks` (auto-detected via `nixpacks.toml`).
+   - **Port:** `3000` (default).
 
-## 3. Variables de Entorno (Crucial)
-
-Ve a la pestaña **Environment** y añade las siguientes llaves (usa tus valores reales):
+### Environment Variables
+Navigate to the **Environment** tab and configure:
 
 ```env
-GROQ_API_KEY=tu_llave
-CEREBRAS_API_KEY=tu_llave
-GOOGLE_GENERATIVE_AI_API_KEY=tu_llave
-OPENROUTER_API_KEY=tu_llave
-DEEPSEEK_API_KEY=tu_llave
-API_PROXY_KEY=tu_clave_secreta_para_proteger_la_api
+# Required — at least one provider key
+GROQ_API_KEY=your_key
+CEREBRAS_API_KEY=your_key
+GOOGLE_GENERATIVE_AI_API_KEY=your_key
+OPENROUTER_API_KEY=your_key
+DEEPSEEK_API_KEY=your_key
+SAMBANOVA_API_KEY=your_key
+MISTRAL_API_KEY=your_key
+NVIDIA_API_KEY=your_key
+GITHUB_MODELS_API_KEY=your_key
+
+# Security — protects all endpoints
+API_PROXY_KEY=your_secret_proxy_key
 PORT=3000
 ```
 
-## 4. Despliegue
+> **Multi-Key Support:** You can provide multiple keys per provider using commas: `GROQ_API_KEY=key1,key2,key3`
 
-1. Dale al botón **Deploy**.
-2. Dokploy leerá el `nixpacks.toml` y arrancará el servidor usando Bun automáticamente.
+### Deploy
+Click **Deploy**. Dokploy reads `nixpacks.toml` and starts the server using Bun automatically.
 
-## 5. Configurar Dominio (Opcional pero recomendado)
+---
 
-Para que tu API sea profesional (ej: `api.tu-dominio.com`):
+## 2. Custom Domain (Recommended)
 
-1. En tu registrador de dominios (Cloudflare, GoDaddy, etc.):
-   - Crea un registro **A** que apunte a la **IP de tu VPS**.
-2. En Dokploy (dentro de tu aplicación):
-   - Ve a la pestaña **Domains**.
-   - Añade el dominio (ej: `ia.tu-negocio.com`).
-   - Dokploy generará el certificado **SSL (HTTPS)** automáticamente.
+To expose the gateway on a professional domain (e.g., `api.yourdomain.com`):
 
-## 6. Despliegue Manual con Docker (Sin Dokploy / n8n / CodeNode)
+1. **DNS Configuration:** Create an `A` record pointing to your VPS IP address.
+2. **Dokploy:** Go to the **Domains** tab in your application settings and add the domain. SSL certificates are generated automatically.
 
-Si no usas la interfaz de Dokploy y accedes directamente por SSH a un VPS (como Ubuntu/Debian), tienes dos caminos:
+---
 
-### Camino A: Docker Compose (Si existe el plugin)
-Si tienes instalado `docker compose` o `docker-compose`:
+## 3. Docker Compose (Without Dokploy)
+
 ```bash
+cp env.template .env    # Configure API keys
 docker compose up -d --build
 ```
 
-### Camino B: "Plain Docker" (Fallback Universal)
-Si la máquina es muy restrictiva y no dispone de compose, compila la imagen y córrela levantando a pelo la imagen:
+The service starts on port `3000` with Traefik labels pre-configured.
+
+---
+
+## 4. Plain Docker (Fallback)
+
+If Docker Compose is not available:
+
 ```bash
 docker build -t llm-gateway .
 docker run -d \
   --name llm-gateway \
   --env-file .env \
   -p 3000:3000 \
-  --label "traefik.enable=true" \
-  --label "traefik.http.routers.llm-gateway.rule=Host(\"api.codenode.cloud\")" \
+  --restart unless-stopped \
   llm-gateway
 ```
 
-## 7. Seguridad (Protección de Créditos)
+---
 
-He añadido una capa de seguridad para que nadie te use los créditos si descubren tu URL:
-1. Asegúrate de poner algo en `API_PROXY_KEY` en Dokploy.
-2. Cualquier petición (n8n, otros agentes) deberá llevar el header: 
-   `Authorization: Bearer tu_clave_secreta`.
+## 5. Verification
+
+After deployment, verify the service is running:
+
+```bash
+# Health check
+curl http://your-host:3000/health
+
+# Service info
+curl http://your-host:3000/info
+
+# Usage dashboard (requires API_PROXY_KEY)
+curl -H "Authorization: Bearer YOUR_KEY" http://your-host:3000/dashboard
+```
+
+---
+
+## 6. Security
+
+All endpoints except `/health` require the `API_PROXY_KEY` header:
+
+```
+Authorization: Bearer your_secret_proxy_key
+```
+
+Ensure `API_PROXY_KEY` is set in your environment to prevent unauthorized usage of your provider API credits.
+
+---
+
+*CodeNode LLM Gateway v3.0 — [codenode.cloud](https://codenode.cloud)*

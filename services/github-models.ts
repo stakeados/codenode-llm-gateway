@@ -1,20 +1,19 @@
 import { KeyRotator } from '../utils/key-rotator';
 import type { AIService, ChatMessage, ChunkDelta, CompletionResponse } from '../types';
 
-const keys = new KeyRotator('DEEPSEEK_API_KEY', 'DeepSeek');
-const BASE_URL = 'https://api.deepseek.com/chat/completions';
+// GitHub Models — free for GitHub users
+// API key: GitHub PAT (Personal Access Token) with no special scopes needed
+const keys = new KeyRotator('GITHUB_MODELS_API_KEY', 'GithubModels');
+const BASE_URL = 'https://models.inference.ai.azure.com/chat/completions';
+const DEFAULT_MODEL = 'gpt-4o-mini';
 
-export const deepseekService: AIService = {
-  name: 'DeepSeek',
+export const githubModelsService: AIService = {
+  name: 'GithubModels',
   supportsTools: true,
-  contextWindow: 64_000,
+  contextWindow: 128_000,
 
   async chat(messages: ChatMessage[], tools?: any[], tool_choice?: any, payloadModel?: string) {
-    const body: any = {
-      model: payloadModel || 'deepseek-chat',
-      messages,
-      stream: true
-    };
+    const body: any = { model: payloadModel || DEFAULT_MODEL, messages, stream: true };
     if (tools?.length) {
       body.tools = tools;
       if (tool_choice) body.tool_choice = tool_choice;
@@ -22,10 +21,7 @@ export const deepseekService: AIService = {
 
     const response = await fetch(BASE_URL, {
       method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${keys.next()}`,
-        'Content-Type': 'application/json'
-      },
+      headers: { 'Authorization': `Bearer ${keys.next()}`, 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
     });
 
@@ -53,7 +49,7 @@ export const deepseekService: AIService = {
               const data = JSON.parse(line.slice(6));
               const delta = data.choices?.[0]?.delta || {};
               yield { content: delta.content, tool_calls: delta.tool_calls, role: delta.role } as ChunkDelta;
-            } catch { /* ignore partial JSON */ }
+            } catch { /* partial JSON */ }
           }
         }
       }
@@ -61,7 +57,7 @@ export const deepseekService: AIService = {
   },
 
   async complete(messages: ChatMessage[], tools?: any[], tool_choice?: any, payloadModel?: string) {
-    const body: any = { model: payloadModel || 'deepseek-chat', messages };
+    const body: any = { model: payloadModel || DEFAULT_MODEL, messages };
     if (tools?.length) {
       body.tools = tools;
       if (tool_choice) body.tool_choice = tool_choice;
@@ -69,10 +65,7 @@ export const deepseekService: AIService = {
 
     const response = await fetch(BASE_URL, {
       method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${keys.next()}`,
-        'Content-Type': 'application/json'
-      },
+      headers: { 'Authorization': `Bearer ${keys.next()}`, 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
     });
 

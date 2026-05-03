@@ -1,10 +1,17 @@
+import { KeyRotator } from '../utils/key-rotator';
 import type { AIService, ChatMessage, ChunkDelta, CompletionResponse } from '../types';
+
+const keys = new KeyRotator('OPENROUTER_API_KEY', 'OpenRouter');
+const BASE_URL = 'https://openrouter.ai/api/v1/chat/completions';
+const DEFAULT_MODEL = 'meta-llama/llama-3.3-70b-instruct:free';
 
 export const openrouterService: AIService = {
     name: 'OpenRouter',
+    supportsTools: true,
+    contextWindow: 128_000,
     async chat(messages: ChatMessage[], tools?: any[], tool_choice?: any, payloadModel?: string) {
         const body: any = {
-            "model": payloadModel || "meta-llama/llama-3-8b-instruct:free",
+            "model": payloadModel || DEFAULT_MODEL,
             "messages": messages,
             "stream": true
         };
@@ -14,10 +21,10 @@ export const openrouterService: AIService = {
             if (tool_choice) body.tool_choice = tool_choice;
         }
 
-        const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        const response = await fetch(BASE_URL, {
             method: "POST",
             headers: {
-                "Authorization": `Bearer ${process.env.OPENROUTER_API_KEY}`,
+                "Authorization": `Bearer ${keys.next()}`,
                 "Content-Type": "application/json",
                 "HTTP-Referer": "https://codenode.cloud",
                 "X-Title": "CodeNode LLM Gateway"
@@ -28,7 +35,7 @@ export const openrouterService: AIService = {
         if (!response.ok) {
             const errorBody = await response.text();
             console.error(`[OpenRouter] Stream Error ${response.status}: ${errorBody}`);
-            throw new Error(`${response.status} ${errorBody}`);
+            throw Object.assign(new Error(`${response.status} ${errorBody}`), { status: response.status });
         }
 
         const reader = response.body?.getReader();
@@ -36,11 +43,13 @@ export const openrouterService: AIService = {
 
         return (async function* () {
             if (!reader) return;
+            let buffer = '';
             while (true) {
                 const { done, value } = await reader.read();
                 if (done) break;
-                const chunk = decoder.decode(value);
-                const lines = chunk.split('\n').filter(line => line.trim() !== '');
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop() || '';
                 for (const line of lines) {
                     if (line.includes('[DONE]')) break;
                     if (line.startsWith('data: ')) {
@@ -62,7 +71,7 @@ export const openrouterService: AIService = {
     },
     async complete(messages: ChatMessage[], tools?: any[], tool_choice?: any, payloadModel?: string) {
         const body: any = {
-            "model": payloadModel || "meta-llama/llama-3-8b-instruct:free",
+            "model": payloadModel || DEFAULT_MODEL,
             "messages": messages
         };
         if (tools && tools.length > 0) {
@@ -70,10 +79,10 @@ export const openrouterService: AIService = {
             if (tool_choice) body.tool_choice = tool_choice;
         }
 
-        const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        const response = await fetch(BASE_URL, {
             method: "POST",
             headers: {
-                "Authorization": `Bearer ${process.env.OPENROUTER_API_KEY}`,
+                "Authorization": `Bearer ${keys.next()}`,
                 "Content-Type": "application/json",
                 "HTTP-Referer": "https://codenode.cloud",
                 "X-Title": "CodeNode LLM Gateway"
@@ -84,7 +93,7 @@ export const openrouterService: AIService = {
         if (!response.ok) {
             const errorBody = await response.text();
             console.error(`[OpenRouter] Complete Error ${response.status}: ${errorBody}`);
-            throw new Error(`${response.status} ${errorBody}`);
+            throw Object.assign(new Error(`${response.status} ${errorBody}`), { status: response.status });
         }
 
         const data = await response.json() as any;

@@ -3,6 +3,11 @@ import { cerebrasService } from './services/cerebras';
 import { geminiService } from './services/gemini';
 import { openRouterService } from './services/openrouter';
 import { deepseekService } from './services/deepseek';
+import { mistralService } from './services/mistral';
+import { nvidiaService } from './services/nvidia';
+import { githubModelsService } from './services/github-models';
+import { emergencyService } from './services/emergency';
+import { usageTracker, estimateMessagesTokens, estimateResponseTokens } from './utils/usage-tracker';
 import type { AIService, ChatMessage, ChunkDelta, CompletionResponse } from './types';
 
 // ─── Service Registry ────────────────────────────────────────────────
@@ -11,581 +16,331 @@ const serviceModels: Record<string, string[]> = {};
 
 if (process.env.GROQ_API_KEY) {
   services.push(groqService);
-  serviceModels['Groq'] = ['llama3-8b-8192', 'llama-3.1-8b-instant', 'mixtral-8x7b-32768'];
+  serviceModels['Groq'] = ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant'];
 }
 if (process.env.CEREBRAS_API_KEY) {
   services.push(cerebrasService);
-  serviceModels['Cerebras'] = ['llama3.1-8b'];
+  serviceModels['Cerebras'] = ['llama-3.3-70b', 'llama3.1-8b'];
 }
 if (process.env.GOOGLE_GENERATIVE_AI_API_KEY) {
   services.push(geminiService);
-  serviceModels['Gemini'] = ['gemini-1.5-flash', 'gemini-2.0-flash-exp'];
+  serviceModels['Gemini'] = ['gemini-2.0-flash', 'gemini-2.5-flash'];
 }
 if (process.env.OPENROUTER_API_KEY) {
   services.push(openRouterService);
-  serviceModels['OpenRouter'] = ['openrouter/auto', 'google/gemini-2.0-flash-exp:free', 'meta-llama/llama-3-8b-instruct:free'];
+  serviceModels['OpenRouter'] = ['openrouter/auto', 'meta-llama/llama-3.3-70b-instruct:free'];
 }
 if (process.env.DEEPSEEK_API_KEY) {
   services.push(deepseekService);
   serviceModels['DeepSeek'] = ['deepseek-chat', 'deepseek-reasoner'];
 }
+if (process.env.MISTRAL_API_KEY) {
+  services.push(mistralService);
+  serviceModels['Mistral'] = ['mistral-small-latest'];
+}
+if (process.env.NVIDIA_API_KEY) {
+  services.push(nvidiaService);
+  serviceModels['Nvidia'] = ['meta/llama-3.3-70b-instruct', 'nvidia/llama-3.1-nemotron-70b-instruct'];
+}
+if (process.env.GITHUB_MODELS_API_KEY) {
+  services.push(githubModelsService);
+  serviceModels['GithubModels'] = ['gpt-4o-mini', 'Meta-Llama-3.3-70B-Instruct', 'Phi-4'];
+}
 
-console.log(`[Gateway] Enabled Services: ${services.map(s => s.name).join(', ') || 'NONE — configure at least one API key!'}`);
+console.log(`[Gateway] Enabled: ${services.map(s => s.name).join(', ') || 'NONE'}`);
 
-// ─── Configuration ───────────────────────────────────────────────────
-const MAX_RETRIES = 3;
-const REQUEST_TIMEOUT_MS = 90_000; // 90 seconds per provider attempt
-const KEEPALIVE_INTERVAL_MS = 15_000; // 15 seconds keepalive for non-streaming
+const REQUEST_TIMEOUT_MS = 90_000;
 
-// ─── Round Robin ─────────────────────────────────────────────────────
+// ─── Emergency Fallback ──────────────────────────────────────────────
+// Phase 2 fallback: re-try a designated FREE provider (configurable)
+const EMERGENCY_FREE_PROVIDER = process.env.EMERGENCY_PROVIDER || 'OpenRouter';
+// Phase 3 fallback: use a PAID API as absolute last resort (requires EMERGENCY_API_KEY)
+const hasPaidEmergency = !!(process.env.EMERGENCY_API_KEY);
+
 let currentServiceIndex = 0;
-
-function getNextService(): AIService | undefined {
+function getNextService(needsTools = false): AIService | undefined {
   if (services.length === 0) return undefined;
-  const service = services[currentServiceIndex];
-  currentServiceIndex = (currentServiceIndex + 1) % services.length;
+  const pool = needsTools ? services.filter(s => s.supportsTools) : services;
+  if (pool.length === 0) return services[0]; // fallback if no tool-capable provider
+  const service = pool[currentServiceIndex % pool.length];
+  currentServiceIndex = (currentServiceIndex + 1) % pool.length;
   return service;
 }
 
-// ─── Smart Router ────────────────────────────────────────────────────
-// Generic OpenAI model names that should NOT be forwarded to providers
 const GENERIC_MODELS = new Set(['gpt-3.5-turbo', 'gpt-4o', 'gpt-4', 'gpt-4o-mini', 'gpt-4-turbo']);
+function isGenericModel(m: string): boolean { return !m || GENERIC_MODELS.has(m); }
+function resolveModelForProvider(m: string): string | undefined { return isGenericModel(m) ? undefined : m; }
 
-function isGenericModel(modelName: string): boolean {
-  return !modelName || GENERIC_MODELS.has(modelName);
+function getServiceForModel(modelName: string, needsTools = false): AIService | undefined {
+  if (isGenericModel(modelName)) return getNextService(needsTools);
+  const lm = modelName.toLowerCase();
+  if (lm.includes('groq') || (lm.includes('llama') && !lm.includes('meta-llama'))) return services.find(s => s.name === 'Groq') || getNextService(needsTools);
+  if (lm.includes('deepseek')) return services.find(s => s.name === 'DeepSeek') || getNextService(needsTools);
+  if (lm.includes('cerebras')) return services.find(s => s.name === 'Cerebras') || getNextService(needsTools);
+  if (lm.includes('gemini')) return services.find(s => s.name === 'Gemini') || getNextService(needsTools);
+  if (lm.includes('mistral') || lm.includes('mixtral')) return services.find(s => s.name === 'Mistral') || services.find(s => s.name === 'Groq') || getNextService(needsTools);
+  if (lm.includes('nvidia') || lm.includes('nemotron') || lm.startsWith('meta/')) return services.find(s => s.name === 'Nvidia') || getNextService(needsTools);
+  if (lm.includes('phi-') || lm.includes('github')) return services.find(s => s.name === 'GithubModels') || getNextService(needsTools);
+  return services.find(s => s.name === 'OpenRouter') || getNextService(needsTools);
 }
 
-// Returns the actual model name to send to the provider.
-// If the agent requested a generic model (gpt-4o), we return undefined
-// so the provider uses its own default model.
-function resolveModelForProvider(modelName: string): string | undefined {
-  return isGenericModel(modelName) ? undefined : modelName;
-}
-
-function getServiceForModel(modelName: string): AIService | undefined {
-  if (isGenericModel(modelName)) {
-    return getNextService();
-  }
-
-  const lowerModel = modelName.toLowerCase();
-
-  if (lowerModel.includes('groq') || (lowerModel.includes('llama') && !lowerModel.includes('meta-llama'))) {
-    return services.find(s => s.name === 'Groq') || getNextService();
-  }
-  if (lowerModel.includes('deepseek')) {
-    return services.find(s => s.name === 'DeepSeek') || getNextService();
-  }
-  if (lowerModel.includes('cerebras')) {
-    return services.find(s => s.name === 'Cerebras') || getNextService();
-  }
-  if (lowerModel.includes('gemini')) {
-    return services.find(s => s.name === 'Gemini') || getNextService();
-  }
-
-  // Default: OpenRouter can handle almost anything
-  return services.find(s => s.name === 'OpenRouter') || getNextService();
-}
-
-// ─── Retry with Failover ─────────────────────────────────────────────
-// This is the KEY difference vs our old code. If a provider fails,
-// we automatically try the next one, up to MAX_RETRIES total attempts.
-async function withRetry<T>(
-  operation: (service: AIService) => Promise<T>,
-  preferredService?: AIService
-): Promise<{ result: T; service: AIService }> {
+// ─── Retry with Full Exhaustion + Emergency Fallback ─────────────────
+// 1. Try the preferred provider first
+// 2. Try ALL remaining providers in order
+// 3. If everything fails, try the emergency provider one final time
+// 4. Only then return an error
+async function withRetry<T>(op: (svc: AIService) => Promise<T>, preferred?: AIService, needsTools = false): Promise<{ result: T; service: AIService }> {
   const tried = new Set<string>();
   let lastError: Error | null = null;
 
-  // Try preferred service first
-  const orderedServices = preferredService
-    ? [preferredService, ...services.filter(s => s.name !== preferredService.name)]
-    : [...services];
+  // Build the ordered list: preferred first, then the rest
+  let ordered = preferred ? [preferred, ...services.filter(s => s.name !== preferred.name)] : [...services];
 
-  for (let attempt = 0; attempt < Math.min(MAX_RETRIES, orderedServices.length); attempt++) {
-    const service = orderedServices[attempt];
-    if (!service || tried.has(service.name)) continue;
-    tried.add(service.name);
+  // Filter for tool-capable providers when needed
+  if (needsTools) {
+    ordered = ordered.filter(s => s.supportsTools);
+    if (ordered.length === 0) ordered = [...services]; // fallback
+    console.log(`[Router] Tools detected → filtering to: ${ordered.map(s => s.name).join(', ')}`);
+  }
 
+  // Phase 1: Try ALL providers in order (no arbitrary cap)
+  for (let i = 0; i < ordered.length; i++) {
+    const svc = ordered[i];
+    if (!svc || tried.has(svc.name)) continue;
+    tried.add(svc.name);
+    const t0 = Date.now();
     try {
-      console.log(`[Retry ${attempt + 1}/${MAX_RETRIES}] Trying ${service.name}...`);
-
-      // Race between the operation and a timeout (with cleanup)
-      let timeoutId: ReturnType<typeof setTimeout>;
-      const result = await Promise.race([
-        operation(service),
-        new Promise<never>((_, reject) => {
-          timeoutId = setTimeout(() => reject(new Error(`Timeout after ${REQUEST_TIMEOUT_MS}ms`)), REQUEST_TIMEOUT_MS);
-        })
-      ]);
-      clearTimeout(timeoutId!);
-
-      return { result, service };
-    } catch (error: any) {
-      lastError = error;
-      console.error(`[Retry] ${service.name} failed: ${error.message}`);
-
-      // If it's a rate limit (429), mark and continue
-      if (error.status === 429 || error.message?.includes('429')) {
-        console.warn(`[Retry] ${service.name} rate-limited (429), rotating...`);
-      }
+      console.log(`[Retry ${tried.size}/${ordered.length}] Trying ${svc.name}...`);
+      let tid: ReturnType<typeof setTimeout>;
+      const result = await Promise.race([op(svc), new Promise<never>((_, rej) => { tid = setTimeout(() => rej(new Error(`Timeout ${REQUEST_TIMEOUT_MS}ms`)), REQUEST_TIMEOUT_MS); })]);
+      clearTimeout(tid!);
+      usageTracker.record(svc.name, true, Date.now() - t0);
+      return { result, service: svc };
+    } catch (e: any) {
+      lastError = e;
+      usageTracker.record(svc.name, false, Date.now() - t0, e.message);
+      console.error(`[Retry] ${svc.name} failed: ${e.message}`);
     }
   }
 
-  throw lastError || new Error('All services exhausted');
+  // Phase 2: Emergency free fallback — retry a designated free provider
+  const emergencyFree = services.find(s => s.name === EMERGENCY_FREE_PROVIDER);
+  if (emergencyFree && (!needsTools || emergencyFree.supportsTools)) {
+    console.warn(`[⚠️ Emergency Free] All ${tried.size} providers failed. Retrying ${emergencyFree.name}...`);
+    const t0 = Date.now();
+    try {
+      let tid: ReturnType<typeof setTimeout>;
+      const result = await Promise.race([op(emergencyFree), new Promise<never>((_, rej) => { tid = setTimeout(() => rej(new Error(`Timeout ${REQUEST_TIMEOUT_MS}ms`)), REQUEST_TIMEOUT_MS); })]);
+      clearTimeout(tid!);
+      usageTracker.record(emergencyFree.name, true, Date.now() - t0);
+      return { result, service: emergencyFree };
+    } catch (e: any) {
+      lastError = e;
+      usageTracker.record(emergencyFree.name, false, Date.now() - t0, e.message);
+      console.error(`[⚠️ Emergency Free] ${emergencyFree.name} also failed: ${e.message}`);
+    }
+  }
+
+  // Phase 3: PAID emergency API — absolute last resort (costs real money)
+  if (hasPaidEmergency && (!needsTools || emergencyService.supportsTools)) {
+    console.warn(`[🚨 PAID Emergency] All free providers exhausted. Using paid API...`);
+    const t0 = Date.now();
+    try {
+      let tid: ReturnType<typeof setTimeout>;
+      const result = await Promise.race([op(emergencyService), new Promise<never>((_, rej) => { tid = setTimeout(() => rej(new Error(`Timeout ${REQUEST_TIMEOUT_MS}ms`)), REQUEST_TIMEOUT_MS); })]);
+      clearTimeout(tid!);
+      usageTracker.record('Emergency', true, Date.now() - t0);
+      return { result, service: emergencyService };
+    } catch (e: any) {
+      lastError = e;
+      usageTracker.record('Emergency', false, Date.now() - t0, e.message);
+      console.error(`[🚨 PAID Emergency] Paid API also failed: ${e.message}`);
+    }
+  }
+
+  throw lastError || new Error('All services exhausted (including emergency fallback)');
 }
 
-// ─── CORS Headers ────────────────────────────────────────────────────
-const CORS_HEADERS = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-API-Key'
-};
+console.log(`[Gateway] Emergency free: ${services.find(s => s.name === EMERGENCY_FREE_PROVIDER) ? EMERGENCY_FREE_PROVIDER + ' ✅' : '⚠️ NOT CONFIGURED'}`);
+console.log(`[Gateway] Emergency paid: ${hasPaidEmergency ? process.env.EMERGENCY_MODEL || 'gpt-4o-mini' + ' ✅' : '⚠️ NOT CONFIGURED (set EMERGENCY_API_KEY)'}`);
 
-// ─── Dynamic Models List ─────────────────────────────────────────────
+const CORS_HEADERS = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-API-Key' };
+
 function buildModelsList() {
   const models: any[] = [];
   const now = Math.floor(Date.now() / 1000);
-
-  // Always advertise generic OpenAI-compatible models so agents recognize us
   models.push(
     { id: 'gpt-4o', object: 'model', created: now, owned_by: 'codenode-gateway' },
     { id: 'gpt-3.5-turbo', object: 'model', created: now, owned_by: 'codenode-gateway' },
     { id: 'gpt-4', object: 'model', created: now, owned_by: 'codenode-gateway' }
   );
-
-  // Add real models from each enabled provider
-  for (const [providerName, providerModels] of Object.entries(serviceModels)) {
-    for (const modelId of providerModels) {
-      models.push({
-        id: modelId,
-        object: 'model',
-        created: now,
-        owned_by: providerName.toLowerCase()
-      });
-    }
+  for (const [prov, pModels] of Object.entries(serviceModels)) {
+    for (const mid of pModels) models.push({ id: mid, object: 'model', created: now, owned_by: prov.toLowerCase() });
   }
-
   return models;
 }
 
-// ─── Server ──────────────────────────────────────────────────────────
+function parseBody(raw: string) {
+  try { return raw ? JSON.parse(raw) : {}; } catch { return null; }
+}
+
+const badJson = (h: any) => new Response(JSON.stringify({ error: { message: 'Invalid JSON body', type: 'invalid_request_error' } }), { status: 400, headers: { 'Content-Type': 'application/json', ...h } });
+const noSvc = (h: any) => new Response(JSON.stringify({ error: { message: 'No services available. Configure at least one API key.', type: 'server_error' } }), { status: 503, headers: { 'Content-Type': 'application/json', ...h } });
+
 const server = Bun.serve({
   port: process.env.PORT ?? 3000,
-  // Global error handler — prevents Bun's generic "Something went wrong!"
   error(error) {
-    console.error('[FATAL] Unhandled error in request handler:', error);
-    return new Response(JSON.stringify({
-      error: { message: error.message || 'Internal server error', type: 'server_error' }
-    }), {
-      status: 500,
-      headers: { 'Content-Type': 'application/json', ...CORS_HEADERS }
-    });
+    console.error('[FATAL]', error);
+    return new Response(JSON.stringify({ error: { message: error.message, type: 'server_error' } }), { status: 500, headers: { 'Content-Type': 'application/json', ...CORS_HEADERS } });
   },
   async fetch(req) {
    try {
-    const { pathname } = new URL(req.url)
+    const { pathname } = new URL(req.url);
+    if (req.method === 'OPTIONS') return new Response(null, { headers: CORS_HEADERS });
 
-    // CORS preflight
-    if (req.method === 'OPTIONS') {
-      return new Response(null, { headers: CORS_HEADERS });
-    }
-
-    // ── Auth layer ──
+    // Auth
     const proxyKey = process.env.API_PROXY_KEY;
     if (proxyKey && pathname !== '/health') {
-      const authHeader = req.headers.get('Authorization') || req.headers.get('X-API-Key');
-      const providedKey = authHeader?.replace(/^Bearer\s+/i, '') || '';
-      if (providedKey !== proxyKey) {
-        return new Response(JSON.stringify({ error: { message: "Unauthorized: Invalid API Key", type: "auth_error" } }), {
-          status: 401,
-          headers: { 'Content-Type': 'application/json', ...CORS_HEADERS }
-        });
-      }
+      const ah = req.headers.get('Authorization') || req.headers.get('X-API-Key');
+      const pk = ah?.replace(/^Bearer\s+/i, '') || '';
+      if (pk !== proxyKey) return new Response(JSON.stringify({ error: { message: 'Unauthorized', type: 'auth_error' } }), { status: 401, headers: { 'Content-Type': 'application/json', ...CORS_HEADERS } });
     }
 
-    // ── GET /v1/models — Dynamic models list ──
+    // GET /v1/models
     if (req.method === 'GET' && (pathname === '/v1/models' || pathname === '/models')) {
-      return new Response(JSON.stringify({
-        object: "list",
-        data: buildModelsList()
-      }), {
-        headers: { 'Content-Type': 'application/json', ...CORS_HEADERS }
-      });
+      return new Response(JSON.stringify({ object: 'list', data: buildModelsList() }), { headers: { 'Content-Type': 'application/json', ...CORS_HEADERS } });
     }
 
-    // ── Health & Info ──
+    // GET /health
     if (req.method === 'GET' && pathname === '/health') {
-      return new Response(JSON.stringify({
-        status: "ok",
-        services: services.map(s => s.name),
-        timestamp: Date.now()
-      }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' }
-      });
+      return new Response(JSON.stringify({ status: 'ok', services: services.map(s => s.name), total: services.length, timestamp: Date.now() }), { status: 200, headers: { 'Content-Type': 'application/json' } });
     }
 
+    // GET /info
     if (req.method === 'GET' && pathname === '/info') {
-      return new Response(JSON.stringify({
-        name: "CodeNode LLM Gateway",
-        description: "OpenAI-compatible proxy for multiple LLM providers with automatic failover",
-        version: "2.0.0",
-        pricing: "BYOK (Bring Your Own Key)",
-        endpoints: ["/v1/chat/completions", "/v1/models", "/health", "/info"],
-        features: ["openai-compatible", "auto-retry", "failover", "tool-calling", "smart-router"],
-        active_providers: services.map(s => s.name)
-      }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json', ...CORS_HEADERS }
-      });
+      return new Response(JSON.stringify({ name: 'CodeNode LLM Gateway', version: '3.0.0', endpoints: ['/v1/chat/completions', '/v1/models', '/health', '/info', '/dashboard'], features: ['openai-compatible', 'auto-retry', 'failover', 'tool-calling', 'smart-router', 'multi-key-rotation', 'usage-tracking'], active_providers: services.map(s => s.name) }), { status: 200, headers: { 'Content-Type': 'application/json', ...CORS_HEADERS } });
     }
 
-    // ── x402 Bazaar Protocol ──
+    // GET /dashboard
+    if (req.method === 'GET' && pathname === '/dashboard') {
+      return new Response(JSON.stringify({ gateway: 'CodeNode LLM Gateway v3.0', ...usageTracker.getSummary(), active_providers: services.map(s => s.name), models: serviceModels }, null, 2), { status: 200, headers: { 'Content-Type': 'application/json', ...CORS_HEADERS } });
+    }
+
+    // x402
     if (process.env.REQUIRE_PAYMENT === 'true' && req.method === 'POST') {
-      const authHeader = req.headers.get('Authorization') || '';
-      if (!authHeader.startsWith('L402') && !authHeader.includes('LSAT')) {
-        return new Response(JSON.stringify({ error: "Payment required (x402/L402 Protocol)" }), {
-          status: 402,
-          headers: {
-            'Content-Type': 'application/json',
-            'WWW-Authenticate': 'L402 macaroon="..."'
-          }
-        });
-      }
+      const ah = req.headers.get('Authorization') || '';
+      if (!ah.startsWith('L402') && !ah.includes('LSAT')) return new Response(JSON.stringify({ error: 'Payment required (x402)' }), { status: 402, headers: { 'Content-Type': 'application/json', 'WWW-Authenticate': 'L402 macaroon="..."' } });
     }
 
-    // ── POST /chat — Legacy/Direct endpoint ────────────────────────────
+    // POST /chat (legacy)
     if (req.method === 'POST' && (pathname === '/chat' || pathname === '/v1/chat')) {
-      let body: any;
+      const body = parseBody(await req.text());
+      if (!body) return badJson(CORS_HEADERS);
+      if (services.length === 0) return noSvc(CORS_HEADERS);
       try {
-        const raw = await req.text();
-        body = raw ? JSON.parse(raw) : {};
-      } catch {
-        return new Response(JSON.stringify({
-          error: { message: 'Invalid JSON body', type: 'invalid_request_error' }
-        }), {
-          status: 400,
-          headers: { 'Content-Type': 'application/json', ...CORS_HEADERS }
-        });
-      }
-      const { messages } = body;
-
-      if (services.length === 0) {
-        return new Response(JSON.stringify({ error: { message: "No services available. Configure at least one API key.", type: "server_error" } }), { status: 503, headers: { 'Content-Type': 'application/json' } });
-      }
-
-      try {
-        const { result: responseStream, service } = await withRetry(
-          (svc) => svc.chat(messages)
-        );
-
-        const encoder = new TextEncoder();
-        const readable = new ReadableStream({
-          async start(controller) {
-            try {
-              for await (const chunk of responseStream) {
-                if (chunk.content) controller.enqueue(encoder.encode(chunk.content));
-              }
-            } catch (e) {
-              console.error('[Chat stream] Error:', e);
-            } finally {
-              controller.close();
-            }
-          }
-        });
-
-        return new Response(readable, {
-          headers: {
-            'Content-Type': 'text/event-stream',
-            'Cache-Control': 'no-cache',
-            'Connection': 'keep-alive',
-            'X-Provider': service.name,
-            ...CORS_HEADERS
-          },
-        });
-      } catch (e: any) {
-        return new Response(JSON.stringify({ error: { message: e.message, type: "server_error" } }), {
-          status: 502, headers: { 'Content-Type': 'application/json', ...CORS_HEADERS }
-        });
-      }
+        const { result: stream, service } = await withRetry(svc => svc.chat(body.messages));
+        const enc = new TextEncoder();
+        const readable = new ReadableStream({ async start(ctrl) { try { for await (const c of stream) { if (c.content) ctrl.enqueue(enc.encode(c.content)); } } catch (e) { console.error('[Chat]', e); } finally { ctrl.close(); } } });
+        return new Response(readable, { headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'X-Provider': service.name, ...CORS_HEADERS } });
+      } catch (e: any) { return new Response(JSON.stringify({ error: { message: e.message, type: 'server_error' } }), { status: 502, headers: { 'Content-Type': 'application/json', ...CORS_HEADERS } }); }
     }
 
-    // ── POST /completion — Simplified endpoint ────────────────────────
+    // POST /completion
     if (req.method === 'POST' && (pathname === '/completion' || pathname === '/v1/completion')) {
-      let body: any;
+      const body = parseBody(await req.text());
+      if (!body) return badJson(CORS_HEADERS);
+      let messages: ChatMessage[] = body.messages || (body.prompt ? [{ role: 'user', content: body.prompt }] : []);
+      if (messages.length === 0) return new Response(JSON.stringify({ error: { message: 'messages or prompt required', type: 'invalid_request' } }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+      if (services.length === 0) return noSvc(CORS_HEADERS);
       try {
-        const raw = await req.text();
-        body = raw ? JSON.parse(raw) : {};
-      } catch {
-        return new Response(JSON.stringify({
-          error: { message: 'Invalid JSON body', type: 'invalid_request_error' }
-        }), {
-          status: 400,
-          headers: { 'Content-Type': 'application/json', ...CORS_HEADERS }
-        });
-      }
-      const { messages: bodyMessages, prompt } = body;
-      let messages: ChatMessage[] = [];
-
-      if (bodyMessages) {
-        messages = bodyMessages;
-      } else if (prompt) {
-        messages = [{ role: 'user', content: prompt }];
-      } else {
-        return new Response(JSON.stringify({ error: { message: "messages or prompt required", type: "invalid_request" } }), { status: 400, headers: { 'Content-Type': 'application/json' } });
-      }
-
-      if (services.length === 0) {
-        return new Response(JSON.stringify({ error: { message: "No services available", type: "server_error" } }), { status: 503, headers: { 'Content-Type': 'application/json' } });
-      }
-
-      try {
-        const { result: responseMessage, service } = await withRetry(
-          (svc) => svc.complete(messages)
-        );
-
-        return new Response(JSON.stringify({ response: responseMessage?.content || '' }), {
-          headers: { 'Content-Type': 'application/json', 'X-Provider': service.name, ...CORS_HEADERS },
-        });
-      } catch (e: any) {
-        return new Response(JSON.stringify({ error: { message: e.message, type: "server_error" } }), {
-          status: 502, headers: { 'Content-Type': 'application/json', ...CORS_HEADERS }
-        });
-      }
+        const { result: msg, service } = await withRetry(svc => svc.complete(messages));
+        return new Response(JSON.stringify({ response: msg?.content || '' }), { headers: { 'Content-Type': 'application/json', 'X-Provider': service.name, ...CORS_HEADERS } });
+      } catch (e: any) { return new Response(JSON.stringify({ error: { message: e.message, type: 'server_error' } }), { status: 502, headers: { 'Content-Type': 'application/json', ...CORS_HEADERS } }); }
     }
 
-    // ── POST /v1/chat/completions — Main OpenAI-compatible endpoint ──
+    // POST /v1/chat/completions (main OpenAI-compatible)
     if (req.method === 'POST' && (pathname === '/v1/chat/completions' || pathname === '/chat/completions')) {
-      let body: any;
-      try {
-        const raw = await req.text();
-        body = raw ? JSON.parse(raw) : {};
-      } catch {
-        return new Response(JSON.stringify({
-          error: { message: 'Invalid JSON body', type: 'invalid_request_error' }
-        }), {
-          status: 400,
-          headers: { 'Content-Type': 'application/json', ...CORS_HEADERS }
-        });
-      }
+      const body = parseBody(await req.text());
+      if (!body) return badJson(CORS_HEADERS);
       const { messages, stream = false, tools, tool_choice } = body;
-      const modelName = body.model || "gpt-3.5-turbo";
+      const modelName = body.model || 'gpt-3.5-turbo';
+      if (services.length === 0) return noSvc(CORS_HEADERS);
 
-      if (services.length === 0) {
-        return new Response(JSON.stringify({
-          error: { message: "No services available. Configure at least one API key in your .env file.", type: "server_error", code: "no_providers" }
-        }), { status: 503, headers: { 'Content-Type': 'application/json', ...CORS_HEADERS } });
-      }
-
-      const preferredService = getServiceForModel(modelName);
-      // Resolve model: generic names (gpt-4o) → undefined (use provider default)
+      const needsTools = !!(tools && tools.length > 0);
+      const preferred = getServiceForModel(modelName, needsTools);
       const providerModel = resolveModelForProvider(modelName);
-
-      console.log(`[Smart Router] Model requested: ${modelName} → Provider model: ${providerModel || 'default'} | Preferred: ${preferredService?.name}`);
+      const inputTokens = estimateMessagesTokens(messages);
+      console.log(`[Router] ${modelName} → ${providerModel || 'default'} | ${preferred?.name}${needsTools ? ' | 🔧 tools' : ''} | ~${inputTokens} input tokens`);
 
       if (stream) {
-        // ── Streaming with retry ──
         try {
-          const { result: responseStream, service } = await withRetry(
-            (svc) => svc.chat(messages, tools, tool_choice, providerModel),
-            preferredService
-          );
-
-          const encoder = new TextEncoder();
-          const id = `chatcmpl-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 8)}`;
-
+          const { result: rs, service } = await withRetry(svc => svc.chat(messages, tools, tool_choice, providerModel), preferred, needsTools);
+          const enc = new TextEncoder();
+          const id = `chatcmpl-${Date.now().toString(36)}-${Math.random().toString(36).substring(2,8)}`;
+          let outputText = '';
           const readable = new ReadableStream({
-            async start(controller) {
+            async start(ctrl) {
               try {
-                for await (const chunkDelta of responseStream) {
-                  const data = JSON.stringify({
-                    id,
-                    object: 'chat.completion.chunk',
-                    created: Math.floor(Date.now() / 1000),
-                    model: modelName,
-                    choices: [{
-                      index: 0,
-                      delta: chunkDelta,
-                      finish_reason: null
-                    }]
-                  });
-                  controller.enqueue(encoder.encode(`data: ${data}\n\n`));
+                for await (const delta of rs) {
+                  if (delta.content) outputText += delta.content;
+                  const d = JSON.stringify({ id, object: 'chat.completion.chunk', created: Math.floor(Date.now()/1000), model: modelName, choices: [{ index: 0, delta, finish_reason: null }] });
+                  ctrl.enqueue(enc.encode(`data: ${d}\n\n`));
                 }
-
-                // Send final chunk with finish_reason
-                const finalChunk = JSON.stringify({
-                  id,
-                  object: 'chat.completion.chunk',
-                  created: Math.floor(Date.now() / 1000),
-                  model: modelName,
-                  choices: [{ index: 0, delta: {}, finish_reason: 'stop' }]
-                });
-                controller.enqueue(encoder.encode(`data: ${finalChunk}\n\n`));
+                ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created: Math.floor(Date.now()/1000), model: modelName, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`));
               } catch (e: any) {
-                console.error("[Stream error]", e.message);
-                // Send error as a proper SSE event
-                const errData = JSON.stringify({
-                  id,
-                  object: 'chat.completion.chunk',
-                  created: Math.floor(Date.now() / 1000),
-                  model: modelName,
-                  choices: [{ index: 0, delta: { content: `\n[Gateway Error: ${e.message}]` }, finish_reason: 'stop' }]
-                });
-                controller.enqueue(encoder.encode(`data: ${errData}\n\n`));
+                console.error('[Stream]', e.message);
+                ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created: Math.floor(Date.now()/1000), model: modelName, choices: [{ index: 0, delta: { content: `\n[Error: ${e.message}]` }, finish_reason: 'stop' }] })}\n\n`));
               } finally {
-                // ALWAYS emit [DONE] — this is critical for agents
-                controller.enqueue(encoder.encode('data: [DONE]\n\n'));
-                controller.close();
+                const outputTokens = estimateResponseTokens(outputText);
+                usageTracker.recordTokens(service.name, inputTokens, outputTokens);
+                ctrl.enqueue(enc.encode('data: [DONE]\n\n'));
+                ctrl.close();
               }
             }
           });
-
-          return new Response(readable, {
-            headers: {
-              'Content-Type': 'text/event-stream',
-              'Cache-Control': 'no-cache',
-              'Connection': 'keep-alive',
-              'X-Provider': service.name,
-              ...CORS_HEADERS
-            },
-          });
+          return new Response(readable, { headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'X-Provider': service.name, ...CORS_HEADERS } });
         } catch (e: any) {
-          // All retries failed — return proper OpenAI error format
-          return new Response(JSON.stringify({
-            error: { message: `All providers failed: ${e.message}`, type: "server_error", code: "provider_exhausted" }
-          }), {
-            status: 502,
-            headers: { 'Content-Type': 'application/json', ...CORS_HEADERS }
-          });
+          return new Response(JSON.stringify({ error: { message: `All providers failed: ${e.message}`, type: 'server_error', code: 'provider_exhausted' } }), { status: 502, headers: { 'Content-Type': 'application/json', ...CORS_HEADERS } });
         }
-
       } else {
-        // ── Non-streaming with retry + keepalive concept ──
         try {
-          const { result: responseMessage, service } = await withRetry(
-            (svc) => svc.complete(messages, tools, tool_choice, providerModel),
-            preferredService
-          );
-
-          if (responseMessage === undefined) {
-            throw new Error('Provider returned empty response');
-          }
-
-          const id = `chatcmpl-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 8)}`;
-
-          const openAIResponse = {
-            id,
-            object: 'chat.completion',
-            created: Math.floor(Date.now() / 1000),
-            model: modelName,
-            choices: [{
-              index: 0,
-              message: responseMessage,
-              finish_reason: responseMessage.tool_calls ? 'tool_calls' : 'stop'
-            }],
-            usage: {
-              prompt_tokens: 0,
-              completion_tokens: 0,
-              total_tokens: 0
-            }
-          };
-
-          return new Response(JSON.stringify(openAIResponse), {
-            headers: {
-              'Content-Type': 'application/json',
-              'X-Provider': service.name,
-              ...CORS_HEADERS
-            },
-          });
+          const { result: msg, service } = await withRetry(svc => svc.complete(messages, tools, tool_choice, providerModel), preferred, needsTools);
+          if (msg === undefined) throw new Error('Empty response');
+          const outputTokens = estimateResponseTokens(msg.content);
+          usageTracker.recordTokens(service.name, inputTokens, outputTokens);
+          const id = `chatcmpl-${Date.now().toString(36)}-${Math.random().toString(36).substring(2,8)}`;
+          return new Response(JSON.stringify({ id, object: 'chat.completion', created: Math.floor(Date.now()/1000), model: modelName, choices: [{ index: 0, message: msg, finish_reason: msg.tool_calls ? 'tool_calls' : 'stop' }], usage: { prompt_tokens: inputTokens, completion_tokens: outputTokens, total_tokens: inputTokens + outputTokens } }), { headers: { 'Content-Type': 'application/json', 'X-Provider': service.name, ...CORS_HEADERS } });
         } catch (e: any) {
-          return new Response(JSON.stringify({
-            error: { message: `All providers failed: ${e.message}`, type: "server_error", code: "provider_exhausted" }
-          }), {
-            status: 502,
-            headers: { 'Content-Type': 'application/json', ...CORS_HEADERS }
-          });
+          return new Response(JSON.stringify({ error: { message: `All providers failed: ${e.message}`, type: 'server_error', code: 'provider_exhausted' } }), { status: 502, headers: { 'Content-Type': 'application/json', ...CORS_HEADERS } });
         }
       }
     }
 
-    // ── POST /v1/responses — Codex/Responses API ──
+    // POST /v1/responses (Codex)
     if (req.method === 'POST' && (pathname === '/v1/responses' || pathname === '/responses')) {
-      let body: any;
+      const body = parseBody(await req.text());
+      if (!body) return badJson(CORS_HEADERS);
+      const messages: ChatMessage[] = (body.input || []).map((item: any) => ({
+        role: item.type === 'message' ? (item.role || 'user') : 'user',
+        content: item.content || item.text || ''
+      }));
+      if (services.length === 0) return noSvc(CORS_HEADERS);
       try {
-        const raw = await req.text();
-        body = raw ? JSON.parse(raw) : {};
-      } catch {
-        return new Response(JSON.stringify({
-          error: { message: 'Invalid JSON body', type: 'invalid_request_error' }
-        }), {
-          status: 400,
-          headers: { 'Content-Type': 'application/json', ...CORS_HEADERS }
-        });
-      }
-      const { input, model } = body as {
-        input: Array<{ type: string, text?: string, content?: string, role?: string }>,
-        model?: string
-      };
-
-      const messages: ChatMessage[] = body.input.map(item => {
-        if (item.type === 'message') {
-          return {
-            role: (item.role as any) || 'user',
-            content: item.content || item.text || ''
-          };
-        }
-        return {
-          role: 'user' as const,
-          content: item.text || item.content || ''
-        };
-      });
-
-      if (services.length === 0) {
-        return new Response(JSON.stringify({ error: { message: "No services available", type: "server_error" } }), { status: 503, headers: { 'Content-Type': 'application/json' } });
-      }
-
-      try {
-        const { result: responseMessage, service } = await withRetry(
-          (svc) => svc.complete(messages)
-        );
-
-        if (responseMessage === undefined) {
-          throw new Error('Provider returned empty response');
-        }
-
-        return new Response(JSON.stringify({
-          content: responseMessage.content || '',
-          type: 'text',
-          model: body.model || 'gpt-5.2-codex'
-        }), {
-          headers: { 'Content-Type': 'application/json', ...CORS_HEADERS },
-        });
+        const { result: msg } = await withRetry(svc => svc.complete(messages));
+        if (msg === undefined) throw new Error('Empty response');
+        return new Response(JSON.stringify({ content: msg.content || '', type: 'text', model: body.model || 'gpt-5.2-codex' }), { headers: { 'Content-Type': 'application/json', ...CORS_HEADERS } });
       } catch (e: any) {
-        return new Response(JSON.stringify({
-          error: { message: e.message, type: "server_error" }
-        }), {
-          status: 502,
-          headers: { 'Content-Type': 'application/json', ...CORS_HEADERS }
-        });
+        return new Response(JSON.stringify({ error: { message: e.message, type: 'server_error' } }), { status: 502, headers: { 'Content-Type': 'application/json', ...CORS_HEADERS } });
       }
     }
 
-    return new Response(JSON.stringify({ error: { message: "Not found", type: "invalid_request" } }), {
-      status: 404,
-      headers: { 'Content-Type': 'application/json', ...CORS_HEADERS }
-    });
-   } catch (fatalError: any) {
-    // Global catch — nothing escapes to Bun's generic handler
-    console.error('[FATAL] Uncaught error:', fatalError);
-    return new Response(JSON.stringify({
-      error: { message: fatalError.message || 'Internal server error', type: 'server_error' }
-    }), {
-      status: 500,
-      headers: { 'Content-Type': 'application/json', ...CORS_HEADERS }
-    });
+    return new Response(JSON.stringify({ error: { message: 'Not found', type: 'invalid_request' } }), { status: 404, headers: { 'Content-Type': 'application/json', ...CORS_HEADERS } });
+   } catch (fatal: any) {
+    console.error('[FATAL]', fatal);
+    return new Response(JSON.stringify({ error: { message: fatal.message, type: 'server_error' } }), { status: 500, headers: { 'Content-Type': 'application/json', ...CORS_HEADERS } });
    }
   }
-})
+});
 
-console.log(`[CodeNode LLM Gateway v2.0] Running on ${server.url}`);
-console.log(`[Gateway] Retry: ${MAX_RETRIES} attempts | Timeout: ${REQUEST_TIMEOUT_MS / 1000}s | Providers: ${services.length}`);
+console.log(`[CodeNode LLM Gateway v3.0] Running on ${server.url}`);
+console.log(`[Gateway] Retry: ALL providers + emergency | Timeout: ${REQUEST_TIMEOUT_MS/1000}s | Providers: ${services.length}`);

@@ -1,17 +1,18 @@
 import { KeyRotator } from '../utils/key-rotator';
 import type { AIService, ChatMessage, ChunkDelta, CompletionResponse } from '../types';
 
-const keys = new KeyRotator('DEEPSEEK_API_KEY', 'DeepSeek');
-const BASE_URL = 'https://api.deepseek.com/chat/completions';
+const keys = new KeyRotator('MISTRAL_API_KEY', 'Mistral');
+const BASE_URL = 'https://api.mistral.ai/v1/chat/completions';
+const DEFAULT_MODEL = 'mistral-small-latest';
 
-export const deepseekService: AIService = {
-  name: 'DeepSeek',
+export const mistralService: AIService = {
+  name: 'Mistral',
   supportsTools: true,
-  contextWindow: 64_000,
+  contextWindow: 32_000,
 
   async chat(messages: ChatMessage[], tools?: any[], tool_choice?: any, payloadModel?: string) {
     const body: any = {
-      model: payloadModel || 'deepseek-chat',
+      model: payloadModel || DEFAULT_MODEL,
       messages,
       stream: true
     };
@@ -31,6 +32,7 @@ export const deepseekService: AIService = {
 
     if (!response.ok) {
       const errText = await response.text();
+      console.error(`[Mistral] Stream Error ${response.status}: ${errText}`);
       throw Object.assign(new Error(`${response.status} ${errText}`), { status: response.status });
     }
 
@@ -53,7 +55,7 @@ export const deepseekService: AIService = {
               const data = JSON.parse(line.slice(6));
               const delta = data.choices?.[0]?.delta || {};
               yield { content: delta.content, tool_calls: delta.tool_calls, role: delta.role } as ChunkDelta;
-            } catch { /* ignore partial JSON */ }
+            } catch { /* ignore partial chunks */ }
           }
         }
       }
@@ -61,7 +63,7 @@ export const deepseekService: AIService = {
   },
 
   async complete(messages: ChatMessage[], tools?: any[], tool_choice?: any, payloadModel?: string) {
-    const body: any = { model: payloadModel || 'deepseek-chat', messages };
+    const body: any = { model: payloadModel || DEFAULT_MODEL, messages };
     if (tools?.length) {
       body.tools = tools;
       if (tool_choice) body.tool_choice = tool_choice;
