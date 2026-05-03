@@ -69,7 +69,23 @@ function getNextService(needsTools = false): AIService | undefined {
 
 const GENERIC_MODELS = new Set(['gpt-3.5-turbo', 'gpt-4o', 'gpt-4', 'gpt-4o-mini', 'gpt-4-turbo']);
 function isGenericModel(m: string): boolean { return !m || GENERIC_MODELS.has(m); }
-function resolveModelForProvider(m: string): string | undefined { return isGenericModel(m) ? undefined : m; }
+
+function resolveModelForService(modelName: string, serviceName: string): string | undefined {
+  if (isGenericModel(modelName)) return undefined;
+  const lm = modelName.toLowerCase();
+  let owner = 'OpenRouter'; // fallback
+  if (lm.includes('groq') || (lm.includes('llama') && !lm.includes('meta-llama'))) owner = 'Groq';
+  else if (lm.includes('deepseek')) owner = 'DeepSeek';
+  else if (lm.includes('cerebras')) owner = 'Cerebras';
+  else if (lm.includes('gemini')) owner = 'Gemini';
+  else if (lm.includes('mistral') || lm.includes('mixtral')) owner = 'Mistral';
+  else if (lm.includes('nvidia') || lm.includes('nemotron') || lm.startsWith('meta/')) owner = 'Nvidia';
+  else if (lm.includes('phi-') || lm.includes('github')) owner = 'GithubModels';
+  
+  if (serviceName === owner) return modelName;
+  if (serviceName === 'OpenRouter' && owner === 'OpenRouter') return modelName;
+  return undefined;
+}
 
 function getServiceForModel(modelName: string, needsTools = false): AIService | undefined {
   if (isGenericModel(modelName)) return getNextService(needsTools);
@@ -268,13 +284,12 @@ const server = Bun.serve({
 
       const needsTools = !!(tools && tools.length > 0);
       const preferred = getServiceForModel(modelName, needsTools);
-      const providerModel = resolveModelForProvider(modelName);
       const inputTokens = estimateMessagesTokens(messages);
-      console.log(`[Router] ${modelName} → ${providerModel || 'default'} | ${preferred?.name}${needsTools ? ' | 🔧 tools' : ''} | ~${inputTokens} input tokens`);
+      console.log(`[Router] ${modelName} | Preferred: ${preferred?.name}${needsTools ? ' | 🔧 tools' : ''} | ~${inputTokens} input tokens`);
 
       if (stream) {
         try {
-          const { result: rs, service } = await withRetry(svc => svc.chat(messages, tools, tool_choice, providerModel), preferred, needsTools);
+          const { result: rs, service } = await withRetry(svc => svc.chat(messages, tools, tool_choice, resolveModelForService(modelName, svc.name)), preferred, needsTools);
           const enc = new TextEncoder();
           const id = `chatcmpl-${Date.now().toString(36)}-${Math.random().toString(36).substring(2,8)}`;
           let outputText = '';
@@ -304,7 +319,7 @@ const server = Bun.serve({
         }
       } else {
         try {
-          const { result: msg, service } = await withRetry(svc => svc.complete(messages, tools, tool_choice, providerModel), preferred, needsTools);
+          const { result: msg, service } = await withRetry(svc => svc.complete(messages, tools, tool_choice, resolveModelForService(modelName, svc.name)), preferred, needsTools);
           if (msg === undefined) throw new Error('Empty response');
           const outputTokens = estimateResponseTokens(msg.content);
           usageTracker.recordTokens(service.name, inputTokens, outputTokens);
