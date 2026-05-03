@@ -218,7 +218,10 @@ const server = Bun.serve({
     const proxyKey = process.env.API_PROXY_KEY;
     if (proxyKey && pathname !== '/health') {
       const ah = req.headers.get('Authorization') || req.headers.get('X-API-Key');
-      const pk = ah?.replace(/^Bearer\s+/i, '') || '';
+      let pk = ah?.replace(/^Bearer\s+/i, '') || '';
+      if (!pk && req.url.includes('?key=')) {
+        pk = new URL(req.url).searchParams.get('key') || '';
+      }
       if (pk !== proxyKey) return new Response(JSON.stringify({ error: { message: 'Unauthorized', type: 'auth_error' } }), { status: 401, headers: { 'Content-Type': 'application/json', ...CORS_HEADERS } });
     }
 
