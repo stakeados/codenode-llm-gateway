@@ -20,10 +20,10 @@ async function imagePart(raw: string) {
   if (url.protocol !== 'https:' || url.username || url.password || (url.port && url.port !== '443')) throw new Error('Image URL must use public HTTPS');
   const addresses = await lookup(url.hostname, { all: true });
   if (!addresses.length || addresses.some(a => !publicImageAddress(a.address))) throw new Error('Private image address rejected');
-  const selected = addresses[0]!;
+  const selected = addresses.find(a => a.family === 4) || addresses[0]!;
   // Pin the checked address for the connection; do not follow redirects or forward credentials.
   const result = await new Promise<{mimeType: string; data: string}>((resolve,reject) => {
-    const req = request(url, { lookup: ((_host: any, options: any, cb: any) => options?.all ? cb(null,[selected]) : cb(null,selected.address,selected.family)) as any }, res => {
+    const req = request(url, { hostname: selected.address, servername: url.hostname, headers: { Host: url.host } }, res => {
       const mimeType = String(res.headers['content-type'] || '').split(';')[0]!;
       if (res.statusCode !== 200 || !/^image\/(jpeg|png|webp|gif)$/.test(mimeType)) { res.resume(); reject(new Error('Image response must be a supported image without redirects')); return; }
       const chunks: Buffer[] = []; let bytes = 0;
