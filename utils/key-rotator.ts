@@ -14,19 +14,12 @@ export class KeyRotator {
     this.provider = provider;
     this.keys = [];
 
-    // Parse primary env var (comma-separated)
-    const primary = process.env[envVarName];
-    if (primary) {
-      this.keys.push(...primary.split(',').map(k => k.trim()).filter(Boolean));
-    }
-
-    // Scan for numbered variants: GROQ_API_KEY_1 .. GROQ_API_KEY_10
-    for (let i = 1; i <= 10; i++) {
-      const numbered = process.env[`${envVarName}_${i}`];
-      if (numbered && !this.keys.includes(numbered.trim())) {
-        this.keys.push(numbered.trim());
-      }
-    }
+    // Numbered variables have no arbitrary upper bound. Deduplicate all entries.
+    const variables = [envVarName, ...Object.keys(process.env)
+      .filter(name => name.startsWith(`${envVarName}_`) && /^\d+$/.test(name.slice(envVarName.length + 1)))
+      .sort((a, b) => Number(a.slice(envVarName.length + 1)) - Number(b.slice(envVarName.length + 1)))];
+    this.keys = [...new Set(variables.flatMap(name =>
+      (process.env[name] || '').split(',').map(key => key.trim()).filter(Boolean)))];
 
     if (this.keys.length > 1) {
       console.log(`[KeyRotator] ${provider}: ${this.keys.length} keys loaded for rotation 🔑`);

@@ -1,6 +1,6 @@
 import { groqService } from './services/groq';
 import { cerebrasService } from './services/cerebras';
-import { geminiService } from './services/gemini';
+import { geminiService, DEFAULT_MODEL } from './services/gemini';
 import { openRouterService } from './services/openrouter';
 import { deepseekService } from './services/deepseek';
 import { mistralService } from './services/mistral';
@@ -24,7 +24,7 @@ if (process.env.CEREBRAS_API_KEY) {
 }
 if (process.env.GOOGLE_GENERATIVE_AI_API_KEY) {
   services.push(geminiService);
-  serviceModels['Gemini'] = ['gemini-2.0-flash', 'gemini-2.5-flash'];
+  serviceModels['Gemini'] = [...new Set([DEFAULT_MODEL, 'gemini-2.5-flash', 'gemini-3-flash-preview', 'gemini-3.1-flash-lite', 'gemini-3.5-flash-lite', 'gemini-3.6-flash'])];
 }
 if (process.env.OPENROUTER_API_KEY) {
   services.push(openRouterService);
@@ -128,7 +128,7 @@ async function withRetry<T>(op: (svc: AIService) => Promise<T>, preferred?: AISe
     try {
       console.log(`[Retry ${tried.size}/${ordered.length}] Trying ${svc.name}...`);
       let tid: ReturnType<typeof setTimeout>;
-      const result = await Promise.race([op(svc), new Promise<never>((_, rej) => { tid = setTimeout(() => rej(new Error(`Timeout ${REQUEST_TIMEOUT_MS}ms`)), REQUEST_TIMEOUT_MS); })]);
+      const result = await Promise.race([op(svc), new Promise<never>((_, rej) => { tid = setTimeout(() => rej(new Error(`Timeout ${REQUEST_TIMEOUT_MS}ms`)), REQUEST_TIMEOUT_MS); })]).finally(() => clearTimeout(tid!));
       clearTimeout(tid!);
       usageTracker.record(svc.name, true, Date.now() - t0);
       return { result, service: svc };
@@ -146,7 +146,7 @@ async function withRetry<T>(op: (svc: AIService) => Promise<T>, preferred?: AISe
     const t0 = Date.now();
     try {
       let tid: ReturnType<typeof setTimeout>;
-      const result = await Promise.race([op(emergencyFree), new Promise<never>((_, rej) => { tid = setTimeout(() => rej(new Error(`Timeout ${REQUEST_TIMEOUT_MS}ms`)), REQUEST_TIMEOUT_MS); })]);
+      const result = await Promise.race([op(emergencyFree), new Promise<never>((_, rej) => { tid = setTimeout(() => rej(new Error(`Timeout ${REQUEST_TIMEOUT_MS}ms`)), REQUEST_TIMEOUT_MS); })]).finally(() => clearTimeout(tid!));
       clearTimeout(tid!);
       usageTracker.record(emergencyFree.name, true, Date.now() - t0);
       return { result, service: emergencyFree };
@@ -163,7 +163,7 @@ async function withRetry<T>(op: (svc: AIService) => Promise<T>, preferred?: AISe
     const t0 = Date.now();
     try {
       let tid: ReturnType<typeof setTimeout>;
-      const result = await Promise.race([op(emergencyService), new Promise<never>((_, rej) => { tid = setTimeout(() => rej(new Error(`Timeout ${REQUEST_TIMEOUT_MS}ms`)), REQUEST_TIMEOUT_MS); })]);
+      const result = await Promise.race([op(emergencyService), new Promise<never>((_, rej) => { tid = setTimeout(() => rej(new Error(`Timeout ${REQUEST_TIMEOUT_MS}ms`)), REQUEST_TIMEOUT_MS); })]).finally(() => clearTimeout(tid!));
       clearTimeout(tid!);
       usageTracker.record('Emergency', true, Date.now() - t0);
       return { result, service: emergencyService };
