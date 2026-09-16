@@ -1,3 +1,4 @@
+import { geminiContents } from '../utils/gemini-content';
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { retryGemini } from '../utils/gemini-retry';
 import { KeyRotator } from '../utils/key-rotator';
@@ -27,10 +28,7 @@ export const geminiService: AIService = {
       const model = genAI.getGenerativeModel({ model: payloadModel || DEFAULT_MODEL }, { timeout: 25_000 });
 
       // Gemini requires alternating user/model roles and the first message must be user
-      let validMessages = messages.map(msg => ({
-        role: msg.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: msg.content || '' }],
-      }));
+      const validMessages = await geminiContents(messages);
 
       // Ensure first message is user
       if (validMessages.length > 0 && validMessages[0]) {
@@ -40,8 +38,7 @@ export const geminiService: AIService = {
       }
 
       const history = validMessages.slice(0, -1);
-      const lastMessagePart = validMessages[validMessages.length - 1]?.parts[0];
-      const lastMessage = lastMessagePart?.text || '';
+      const lastMessage = validMessages[validMessages.length - 1]?.parts || [{ text: '' }];
 
       const chat = model.startChat({ history });
       const result = await retryGemini(() => chat.sendMessageStream(lastMessage));
@@ -70,10 +67,7 @@ export const geminiService: AIService = {
       const genAI = getGenAI();
       const model = genAI.getGenerativeModel({ model: payloadModel || DEFAULT_MODEL }, { timeout: 25_000 });
 
-      let validMessages = messages.map(msg => ({
-        role: msg.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: msg.content || '' }],
-      }));
+      const validMessages = await geminiContents(messages);
 
       // Ensure first message is user
       if (validMessages.length > 0 && validMessages[0]) {
@@ -83,8 +77,7 @@ export const geminiService: AIService = {
       }
 
       const history = validMessages.slice(0, -1);
-      const lastMessagePart = validMessages[validMessages.length - 1]?.parts[0];
-      const lastMessage = lastMessagePart?.text || '';
+      const lastMessage = validMessages[validMessages.length - 1]?.parts || [{ text: '' }];
 
       const chat = model.startChat({ history });
       const result = await retryGemini(() => chat.sendMessage(lastMessage));
