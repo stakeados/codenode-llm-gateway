@@ -1,9 +1,10 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import { retryGemini } from '../utils/gemini-retry';
 import { KeyRotator } from '../utils/key-rotator';
 import type { AIService, ChatMessage, ChunkDelta, CompletionResponse } from '../types';
 
 const keys = new KeyRotator('GOOGLE_GENERATIVE_AI_API_KEY', 'Gemini');
-const DEFAULT_MODEL = 'gemini-2.0-flash';
+export const DEFAULT_MODEL = process.env.GEMINI_DEFAULT_MODEL?.trim() || 'gemini-3-flash-preview';
 
 // Pool of GenAI instances — one per API key for multi-key rotation
 const genAIPool = keys.all().map(key => new GoogleGenerativeAI(key));
@@ -23,7 +24,7 @@ export const geminiService: AIService = {
   async chat(messages: ChatMessage[], tools?: any[], tool_choice?: any, payloadModel?: string) {
     try {
       const genAI = getGenAI();
-      const model = genAI.getGenerativeModel({ model: payloadModel || DEFAULT_MODEL });
+      const model = genAI.getGenerativeModel({ model: payloadModel || DEFAULT_MODEL }, { timeout: 25_000 });
 
       // Gemini requires alternating user/model roles and the first message must be user
       let validMessages = messages.map(msg => ({
@@ -43,7 +44,7 @@ export const geminiService: AIService = {
       const lastMessage = lastMessagePart?.text || '';
 
       const chat = model.startChat({ history });
-      const result = await chat.sendMessageStream(lastMessage);
+      const result = await retryGemini(() => chat.sendMessageStream(lastMessage));
 
       // FIX: yield ChunkDelta objects, not raw strings
       return (async function* () {
@@ -55,7 +56,7 @@ export const geminiService: AIService = {
         }
       })();
     } catch (error: any) {
-      console.error(`[Gemini] Error: ${error.message}`, error);
+      console.error(`[Gemini] Stream failed (status ${error.status || "network"})`);
       throw error;
     }
   },
@@ -67,7 +68,7 @@ export const geminiService: AIService = {
       }
 
       const genAI = getGenAI();
-      const model = genAI.getGenerativeModel({ model: payloadModel || DEFAULT_MODEL });
+      const model = genAI.getGenerativeModel({ model: payloadModel || DEFAULT_MODEL }, { timeout: 25_000 });
 
       let validMessages = messages.map(msg => ({
         role: msg.role === 'assistant' ? 'model' : 'user',
@@ -86,7 +87,7 @@ export const geminiService: AIService = {
       const lastMessage = lastMessagePart?.text || '';
 
       const chat = model.startChat({ history });
-      const result = await chat.sendMessage(lastMessage);
+      const result = await retryGemini(() => chat.sendMessage(lastMessage));
 
       // FIX: return CompletionResponse object, not raw string
       return {
@@ -94,7 +95,7 @@ export const geminiService: AIService = {
         content: result.response.text() || null
       } as CompletionResponse;
     } catch (error: any) {
-      console.error(`[Gemini] Complete Error: ${error.message}`, error);
+      console.error(`[Gemini] Complete failed (status ${error.status || "network"})`);
       throw error;
     }
   }
