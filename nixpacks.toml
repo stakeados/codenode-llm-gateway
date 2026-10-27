@@ -1,5 +1,10 @@
 [phases.setup]
 nixPkgs = ["bun"]
+# Verify the official Bun archive and patch the system decoder before installing dependencies.
+cmds = [
+  ". /etc/os-release && test \"$ID:$VERSION_ID\" = ubuntu:24.04 && apt-get update && apt-get install -y --no-install-recommends unzip && apt-get install -y --no-install-recommends --only-upgrade libbrotli1 && dpkg --compare-versions \"$(dpkg-query -W -f='${Version}' libbrotli1)\" ge 1.1.0-2ubuntu0.1 && rm -rf /var/lib/apt/lists/*",
+  "set -eu; case \"$(uname -m)\" in x86_64) asset=bun-linux-x64-baseline; digest=e0446eb55995772eb9894bebae9a6be368d985a8b9271ee124486f9946eedd76 ;; aarch64) asset=bun-linux-aarch64; digest=baa6bb36f51d6e58561e02bbea825038a9df454f673d6d776e8bbf86f8c7850e ;; *) exit 1 ;; esac; target=\"$(readlink -f \"$(command -v bun)\")\"; case \"$target\" in /nix/store/*/bin/bun) ;; *) exit 1 ;; esac; task_tmp=\"$(mktemp -d)\"; cd \"$task_tmp\"; curl -fsSLO \"https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/$asset.zip\"; echo \"$digest  $asset.zip\" | sha256sum -c --status; unzip -p \"$asset.zip\" \"$asset/bun\" > bun; install -m 755 bun \"$target\"; test \"$(bun --version)\" = 1.4.4; cd /; rm -rf \"$task_tmp\""
+]
 
 [phases.install]
 cmds = ["bun install"]
